@@ -23,6 +23,12 @@ precision highp int;
 */
 #define OperationMode 1
 
+/*
+* If set, will use edge direction to improve visual quality
+* Expect a minimal cost increase
+*/
+// #define UseEdgeDirection
+
 #define EdgeThreshold 8.0/255.0
 
 #define EdgeSharpness 2.0
@@ -54,21 +60,46 @@ float fastLanczos2(float x)
 	wA *= wA;
 	return wB*wA;
 }
-vec2 weightY(float dx, float dy,float c, float std)
+
+#if defined(UseEdgeDirection)
+vec2 weightY(float dx, float dy, float c, vec3 data)
+#else
+vec2 weightY(float dx, float dy, float c, float data)
+#endif
 {
+#if defined(UseEdgeDirection)
+	float std = data.x;
+	vec2 dir = data.yz;
+
+	float edgeDis = ((dx*dir.y)+(dy*dir.x));
+	float x = (((dx*dx)+(dy*dy))+((edgeDis*edgeDis)*((clamp(((c*c)*std),0.0,1.0)*0.7)+-1.0)));
+#else
+	float std = data;
 	float x = ((dx*dx)+(dy* dy))* 0.55 + clamp(abs(c)*std, 0.0, 1.0);
+#endif
+
 	float w = fastLanczos2(x);
 	return vec2(w, w * c);	
 }
 
+vec2 edgeDirection(vec4 left, vec4 right)
+{
+	vec2 dir;
+	float RxLz = (right.x + (-left.z));
+	float RwLy = (right.w + (-left.y));
+	vec2 delta;
+	delta.x = (RxLz + RwLy);
+	delta.y = (RxLz + (-RwLy));
+	float lengthInv = inversesqrt((delta.x * delta.x+ 3.075740e-05) + (delta.y * delta.y));
+	dir.x = (delta.x * lengthInv);
+	dir.y = (delta.y * lengthInv);
+	return dir;
+}
+
 void main()
 {
-	int mode = OperationMode;
-	float edgeThreshold = EdgeThreshold;
-	float edgeSharpness = EdgeSharpness;
-
 	vec4 color;
-	if(mode == 1)
+	if(OperationMode == 1)
 		color.xyz = textureLod(ps0,in_TEXCOORD0.xy,0.0).xyz;
 	else
 		color.xyzw = textureLod(ps0,in_TEXCOORD0.xy,0.0).xyzw;
@@ -79,54 +110,57 @@ void main()
 	yCenter = abs(in_TEXCOORD0.y+-0.5);
 
 	//todo: config the SR region based on needs
-	//if ( mode!=4 && xCenter*xCenter+yCenter*yCenter<=0.4 * 0.4)
-	if ( mode!=4)
+	//if ( OperationMode!=4 && xCenter*xCenter+yCenter*yCenter<=0.4 * 0.4)
+	if ( OperationMode!=4)
 	{
 		highp vec2 imgCoord = ((in_TEXCOORD0.xy*ViewportInfo[0].zw)+vec2(-0.5,0.5));
 		highp vec2 imgCoordPixel = floor(imgCoord);
 		highp vec2 coord = (imgCoordPixel*ViewportInfo[0].xy);
 		vec2 pl = (imgCoord+(-imgCoordPixel));
-		vec4  left = textureGather(ps0,coord, mode);
+		vec4  left = textureGather(ps0,coord, OperationMode);
 
-		float edgeVote = abs(left.z - left.y) + abs(color[mode] - left.y)  + abs(color[mode] - left.z) ;
-		if(edgeVote > edgeThreshold)
+		float edgeVote = abs(left.z - left.y) + abs(color[OperationMode] - left.y)  + abs(color[OperationMode] - left.z) ;
+		if(edgeVote > EdgeThreshold)
 		{
 			coord.x += ViewportInfo[0].x;
 
-			vec4 right = textureGather(ps0,coord + highp vec2(ViewportInfo[0].x, 0.0), mode);
+			vec4 right = textureGather(ps0,coord + highp vec2(ViewportInfo[0].x, 0.0), OperationMode);
 			vec4 upDown;
-			upDown.xy = textureGather(ps0,coord + highp vec2(0.0, -ViewportInfo[0].y),mode).wz;
-			upDown.zw  = textureGather(ps0,coord+ highp vec2(0.0, ViewportInfo[0].y), mode).yx;
+			upDown.xy = textureGather(ps0,coord + highp vec2(0.0, -ViewportInfo[0].y),OperationMode).wz;
+			upDown.zw  = textureGather(ps0,coord+ highp vec2(0.0, ViewportInfo[0].y), OperationMode).yx;
 
 			float mean = (left.y+left.z+right.x+right.w)*0.25;
 			left = left - vec4(mean);
 			right = right - vec4(mean);
 			upDown = upDown - vec4(mean);
-			color.w =color[mode] - mean;
+			color.w =color[OperationMode] - mean;
 
 			float sum = (((((abs(left.x)+abs(left.y))+abs(left.z))+abs(left.w))+(((abs(right.x)+abs(right.y))+abs(right.z))+abs(right.w)))+(((abs(upDown.x)+abs(upDown.y))+abs(upDown.z))+abs(upDown.w)));				
-			float std = 2.181818/sum;
-			
-			vec2 aWY = weightY(pl.x, pl.y+1.0, upDown.x,std);				
-			aWY += weightY(pl.x-1.0, pl.y+1.0, upDown.y,std);
-			aWY += weightY(pl.x-1.0, pl.y-2.0, upDown.z,std);
-			aWY += weightY(pl.x, pl.y-2.0, upDown.w,std);			
-			aWY += weightY(pl.x+1.0, pl.y-1.0, left.x,std);
-			aWY += weightY(pl.x, pl.y-1.0, left.y,std);
-			aWY += weightY(pl.x, pl.y, left.z,std);
-			aWY += weightY(pl.x+1.0, pl.y, left.w,std);
-			aWY += weightY(pl.x-1.0, pl.y-1.0, right.x,std);
-			aWY += weightY(pl.x-2.0, pl.y-1.0, right.y,std);
-			aWY += weightY(pl.x-2.0, pl.y, right.z,std);
-			aWY += weightY(pl.x-1.0, pl.y, right.w,std);
+			float sumMean = 1.014185e+01/sum;
+			float std = (sumMean*sumMean);	
+
+#if defined(UseEdgeDirection)
+			vec3 data = vec3(std, edgeDirection(left, right));
+#else
+			float data = std;
+#endif
+			vec2 aWY = weightY(pl.x, pl.y+1.0, upDown.x,data);				
+			aWY += weightY(pl.x-1.0, pl.y+1.0, upDown.y,data);
+			aWY += weightY(pl.x-1.0, pl.y-2.0, upDown.z,data);
+			aWY += weightY(pl.x, pl.y-2.0, upDown.w,data);			
+			aWY += weightY(pl.x+1.0, pl.y-1.0, left.x,data);
+			aWY += weightY(pl.x, pl.y-1.0, left.y,data);
+			aWY += weightY(pl.x, pl.y, left.z,data);
+			aWY += weightY(pl.x+1.0, pl.y, left.w,data);
+			aWY += weightY(pl.x-1.0, pl.y-1.0, right.x,data);
+			aWY += weightY(pl.x-2.0, pl.y-1.0, right.y,data);
+			aWY += weightY(pl.x-2.0, pl.y, right.z,data);
+			aWY += weightY(pl.x-1.0, pl.y, right.w,data);
 
 			float finalY = aWY.y/aWY.x;
-
 			float maxY = max(max(left.y,left.z),max(right.x,right.w));
 			float minY = min(min(left.y,left.z),min(right.x,right.w));
-			finalY = clamp(edgeSharpness*finalY, minY, maxY);
-					
-			float deltaY = finalY -color.w;	
+			float deltaY = clamp(EdgeSharpness*finalY, minY, maxY) -color.w;			
 			
 			//smooth high contrast input
 			deltaY = clamp(deltaY, -23.0 / 255.0, 23.0 / 255.0);
